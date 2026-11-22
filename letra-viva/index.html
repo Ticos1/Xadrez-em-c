@@ -194,13 +194,14 @@ details[open] summary{margin-bottom:10px}
         <div class="row"><button class="primary" id="btnExport">⬇️ Exportar vídeo</button><button id="btnExpCancel" hidden>Cancelar</button></div>
         <div class="prog" id="expProg" hidden><i id="expBar"></i></div>
         <div class="status" id="expStatus"></div>
-        <p class="hint">A gravação acontece em tempo real: um corte de 30 s leva 30 s. Deixe esta aba aberta e a tela ligada até terminar.</p>
+        <p class="hint">O vídeo é gerado quadro a quadro em MP4 (30 fps), então sai liso mesmo em celular mais fraco. Pode levar um pouco mais que a duração do corte: deixe esta aba aberta até terminar.</p>
       </div>
       <div class="expout" id="expOut"></div>
     </div>
   </div>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/mp4-muxer@5.2.2/build/mp4-muxer.min.js"></script>
 <script src="https://www.youtube.com/iframe_api"></script>
 <script>
 const ACCENTS=['#ffc53d','#5ab4ff'];
@@ -262,10 +263,14 @@ function build(){
 }
 
 /* ================= desenho do palco (canvas) ================= */
-const W=1280,H=720,S=1.5;
+const W=1280,H=720;let S=1.5;
 const stageCv=$('stage'), sctx=stageCv.getContext('2d');
 const lyrCv=document.createElement('canvas'); const LX=556,LY=100,LW=680,LH=590;
-lyrCv.width=LW*S; lyrCv.height=LH*S; const lctx=lyrCv.getContext('2d');
+const lctx=lyrCv.getContext('2d');
+function setScale(s){S=s;stageCv.width=Math.round(W*s);stageCv.height=Math.round(H*s);lyrCv.width=Math.round(LW*s);lyrCv.height=Math.round(LH*s)}
+function previewScale(){const w=$('stageBox').clientWidth||1280;return clamp(w*(window.devicePixelRatio||1)/W,.5,1.5)}
+setScale(previewScale());
+new ResizeObserver(()=>{if(!exporting){const s=previewScale();if(Math.abs(s-S)>.05)setScale(s)}}).observe($('stageBox'));
 const FS=42, FONT='Outfit, "Avenir Next", "Segoe UI", system-ui, sans-serif', UI='Inter, system-ui, sans-serif';
 const fontFor=(w,size)=>(w.i?'italic ':'')+(w.b?'800 ':w.i?'600 ':'700 ')+size+'px '+FONT;
 const stars=[...Array(70)].map((_,i)=>{const r=Math.sin(i*99.13)*43758.5453;const f=v=>v-Math.floor(v);return{x:f(r)*W,y:f(r*1.7)*H,p:f(r*2.3),s:f(r*3.1)<.2?1.5:1}});
@@ -722,77 +727,144 @@ function updateAudioNote(){
   $('expAudio').textContent=mp3.buffer?'🎧 O vídeo vai sair com o som do MP3 carregado.':`🔇 Sem MP3 carregado, o vídeo sai sem som. Dá para adicionar a música no próprio TikTok, começando em ${$('eStart').value}.`;
 }
 ['eStart','eEnd'].forEach(id=>$(id).addEventListener('input',()=>{[...$('rangeChips').children].forEach(x=>x.classList.remove('on'));updateAudioNote()}));
-function pickMime(){
-  const list=['video/mp4;codecs=avc1.42E01E,mp4a.40.2','video/mp4;codecs=avc1','video/mp4','video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm'];
-  return list.find(m=>window.MediaRecorder&&MediaRecorder.isTypeSupported(m))||'';
-}
-function compose(oc,ow,oh){
-  oc.setTransform(1,0,0,1,0,0);oc.filter='none';oc.globalAlpha=1;
-  if(ow===1920){oc.drawImage(stageCv,0,0,ow,oh);return}
+let bgCache=null;
+function composeBg(ow,oh){
+  if(bgCache&&bgCache.w===ow&&bgCache.h===oh&&bgCache.img===coverImg)return bgCache.cv;
+  const cv=document.createElement('canvas');cv.width=ow;cv.height=oh;const oc=cv.getContext('2d');
   if(coverImg){oc.filter='blur(40px)';drawCoverFit(oc,coverImg,-80,-80,ow+160,oh+160);oc.filter='none'}
   else{const g=oc.createLinearGradient(0,0,0,oh);g.addColorStop(0,'#18284a');g.addColorStop(1,'#0a1530');oc.fillStyle=g;oc.fillRect(0,0,ow,oh)}
   oc.fillStyle='rgba(5,10,25,.6)';oc.fillRect(0,0,ow,oh);
-  const sh=ow*9/16,sy=(oh-sh)/2;oc.drawImage(stageCv,0,sy,ow,sh);
-  const title=$('iTitle').value||'',artist=$('iArtist').value||'',handle=$('iHandle').value||'';
+  const sh=ow*9/16,sy=(oh-sh)/2,title=$('iTitle').value||'',artist=$('iArtist').value||'',handle=$('iHandle').value||'';
   oc.textAlign='center';oc.fillStyle='#fff';oc.font='800 64px '+FONT;
   let tt=title;while(oc.measureText(tt).width>ow-120&&tt.length>4)tt=tt.slice(0,-2);if(tt!==title)tt=tt.trim()+'…';
   oc.fillText(tt,ow/2,sy-110);oc.font='500 36px '+UI;oc.fillStyle='rgba(255,255,255,.75)';oc.fillText(artist,ow/2,sy-56);
   if(handle){oc.font='600 30px '+UI;oc.fillStyle='rgba(255,255,255,.6)';oc.fillText(handle,ow/2,sy+sh+90)}
-  oc.textAlign='left';
+  bgCache={w:ow,h:oh,img:coverImg,cv};return cv;
 }
+function compose(oc,ow,oh){
+  oc.setTransform(1,0,0,1,0,0);oc.filter='none';oc.globalAlpha=1;
+  if(ow>oh){oc.drawImage(stageCv,0,0,ow,oh);return}
+  oc.drawImage(composeBg(ow,oh),0,0);
+  const sh=ow*9/16;oc.drawImage(stageCv,0,(oh-sh)/2,ow,sh);
+}
+function pickMime(){
+  const list=['video/mp4;codecs=avc1.42E01E,mp4a.40.2','video/mp4;codecs=avc1','video/mp4','video/webm;codecs=vp9,opus','video/webm'];
+  return list.find(m=>window.MediaRecorder&&MediaRecorder.isTypeSupported(m))||'';
+}
+async function pickVideoCfg(w,h){
+  if(!window.VideoEncoder)return null;
+  for(const codec of ['avc1.640028','avc1.4d0028','avc1.42002a','avc1.640032','avc1.420034']){
+    const cfg={codec,width:w,height:h,bitrate:10e6,framerate:30,avc:{format:'avc'}};
+    try{if((await VideoEncoder.isConfigSupported(cfg)).supported)return cfg}catch(e){}
+  }
+  return null;
+}
+async function pickAudioCfg(){
+  if(!window.AudioEncoder)return null;
+  for(const [codec,mux] of [['mp4a.40.2','aac'],['opus','opus']]){
+    const cfg={codec,sampleRate:48000,numberOfChannels:2,bitrate:192000};
+    try{if((await AudioEncoder.isConfigSupported(cfg)).supported)return {cfg,mux}}catch(e){}
+  }
+  return null;
+}
+let expCancelled=false;
 async function exportVideo(){
-  const a=parseT($('eStart').value),b=parseT($('eEnd').value),len=songLength();
+  const a=parseT($('eStart').value),b=parseT($('eEnd').value);
   if(!(b>a)){$('expStatus').textContent='O fim precisa ser depois do início.';return}
   if(b-a>180){$('expStatus').textContent='Para não travar, exporte no máximo 3 minutos por vez.';return}
-  const mime=pickMime(); if(!mime||!stageCv.captureStream){$('expStatus').textContent='Este navegador não consegue gravar vídeo. Use o Chrome atualizado.';return}
   if(!lines.length){$('expStatus').textContent='Carregue a letra antes de exportar.';return}
-  pause(); exporting=true; cutRange=null;
   const ow=expFmt==='v'?1080:1920, oh=expFmt==='v'?1920:1080;
+  pause(); exporting=true; cutRange=null; expCancelled=false; expAbort=()=>{expCancelled=true};
+  $('btnExport').disabled=true;$('btnExpCancel').hidden=false;$('expProg').hidden=false;$('expBar').style.width='0%';
+  setScale(ow/1280>1?1.5:ow/1280); bgCache=null;
   const out=document.createElement('canvas');out.width=ow;out.height=oh;const oc=out.getContext('2d');
   const box=$('expOut');box.innerHTML='';box.appendChild(out);
-  const stream=out.captureStream(30);
-  let actx=null,srcNode=null;
-  if(mp3.buffer){
-    const AC=window.AudioContext||window.webkitAudioContext;actx=new AC();
-    const dest=actx.createMediaStreamDestination();srcNode=actx.createBufferSource();srcNode.buffer=mp3.buffer;
-    srcNode.connect(dest);srcNode.connect(actx.destination);dest.stream.getAudioTracks().forEach(tr=>stream.addTrack(tr));
-  }
-  const rec=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:9e6,audioBitsPerSecond:192000});
-  const chunks=[];rec.ondataavailable=e=>{if(e.data.size)chunks.push(e.data)};
   let wake=null;try{wake=await navigator.wakeLock?.request('screen')}catch(e){}
-  $('btnExport').disabled=true;$('btnExpCancel').hidden=false;$('expProg').hidden=false;$('expBar').style.width='0%';
-  $('expStatus').textContent='Gravando… deixe esta aba aberta.';
-  let cancelled=false; expAbort=()=>{cancelled=true};
-  renderStage(a,true,0);compose(oc,ow,oh);
-  rec.start(500);
-  let clock;
-  if(actx){await actx.resume();const t0=actx.currentTime+.15;srcNode.start(t0,Math.min(a,mp3.buffer.duration-0.05),b-a);clock=()=>Math.max(0,actx.currentTime-t0)}
-  else{const p0=performance.now();clock=()=>(performance.now()-p0)/1000}
-  await new Promise(res=>{
-    const step=()=>{
-      const e=clock(),t=a+e;
-      if(cancelled||e>=b-a){res();return}
-      renderStage(t,true,e);compose(oc,ow,oh);
-      $('expBar').style.width=(e/(b-a)*100).toFixed(1)+'%';
-      requestAnimationFrame(step);
-    };
-    requestAnimationFrame(step);
-  });
-  const done=new Promise(r=>rec.onstop=r); rec.stop(); await done;
-  try{srcNode&&srcNode.stop()}catch(e){} actx&&actx.close(); try{wake&&wake.release()}catch(e){}
-  exporting=false; expAbort=null; $('btnExport').disabled=false; $('btnExpCancel').hidden=true; $('expProg').hidden=true;
-  if(cancelled){box.innerHTML='';$('expStatus').textContent='Exportação cancelada.';return}
-  const type=mime.split(';')[0], ext=type==='video/mp4'?'mp4':'webm';
-  const blob=new Blob(chunks,{type}), url=URL.createObjectURL(blob);
+  let result=null;
+  try{
+    const vcfg=window.Mp4Muxer?await pickVideoCfg(ow,oh):null;
+    result=vcfg?await encodeOffline(a,b,out,oc,ow,oh,vcfg):await encodeRealtime(a,b,out,oc,ow,oh);
+  }catch(err){console.error(err);$('expStatus').textContent='Não deu para gerar o vídeo: '+(err?.message||err);}
+  try{wake&&wake.release()}catch(e){}
+  exporting=false;expAbort=null;$('btnExport').disabled=false;$('btnExpCancel').hidden=true;$('expProg').hidden=true;
+  setScale(previewScale());
+  if(expCancelled){box.innerHTML='';$('expStatus').textContent='Exportação cancelada.';return}
+  if(!result)return;
+  const {blob,ext,note}=result, url=URL.createObjectURL(blob);
   const name=((($('iTitle').value||'letra')+'-'+fmt(a).replace(':','m')).normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^\w-]+/g,'-').toLowerCase())+'.'+ext;
   box.innerHTML='';
   const v=document.createElement('video');v.src=url;v.controls=true;v.playsInline=true;box.appendChild(v);
   const row=document.createElement('div');row.className='row';
   const dl=document.createElement('a');dl.className='filebtn primary';dl.href=url;dl.download=name;dl.textContent='⬇️ Baixar vídeo';row.appendChild(dl);
-  const file=new File([blob],name,{type});
+  const file=new File([blob],name,{type:blob.type});
   if(navigator.canShare&&navigator.canShare({files:[file]})){const sb=document.createElement('button');sb.textContent='📤 Compartilhar (TikTok, etc.)';sb.onclick=()=>navigator.share({files:[file]}).catch(()=>{});row.appendChild(sb)}
   box.appendChild(row);
-  $('expStatus').textContent=`Pronto! ${name} · ${(blob.size/1048576).toFixed(1)} MB`+(ext==='webm'?'. Este navegador só grava em WebM; se o TikTok recusar, converta para MP4 ou use o Chrome atualizado.':'');
+  $('expStatus').textContent=`Pronto! ${name} · ${fmt(b-a)} · ${(blob.size/1048576).toFixed(1)} MB`+(note?'. '+note:'');
+}
+async function encodeOffline(a,b,out,oc,ow,oh,vcfg){
+  const fps=30,N=Math.round((b-a)*fps);
+  let audio=null,pcm=null,note='';
+  if(mp3.buffer){
+    audio=await pickAudioCfg();
+    if(audio){
+      $('expStatus').textContent='Preparando o áudio…';
+      const len=Math.min(b-a,mp3.buffer.duration-a); 
+      if(len>0){const off=new OfflineAudioContext(2,Math.ceil((b-a)*48000),48000),s=off.createBufferSource();s.buffer=mp3.buffer;s.connect(off.destination);s.start(0,a,len);pcm=await off.startRendering()}
+      if(audio.mux==='opus')note='Este navegador não gera áudio AAC, então o som saiu em Opus. Se o TikTok recusar, exporte pelo Chrome no computador';
+    }else note='Este navegador não codifica áudio, então o vídeo saiu sem som';
+  }
+  const muxer=new Mp4Muxer.Muxer({target:new Mp4Muxer.ArrayBufferTarget(),
+    video:{codec:'avc',width:ow,height:oh,frameRate:fps},
+    audio:pcm?{codec:audio.mux,numberOfChannels:2,sampleRate:48000}:undefined,
+    fastStart:'in-memory',firstTimestampBehavior:'offset'});
+  let encErr=null;
+  const ve=new VideoEncoder({output:(c,m)=>muxer.addVideoChunk(c,m),error:e=>{encErr=e}});
+  ve.configure(vcfg);
+  const ae=pcm?new AudioEncoder({output:(c,m)=>muxer.addAudioChunk(c,m),error:e=>{encErr=e}}):null;
+  if(ae)ae.configure(audio.cfg);
+  const L=pcm?.getChannelData(0),R=pcm?.getChannelData(1),SPF=48000/fps; let apos=0;
+  const pushAudio=upto=>{
+    while(ae&&apos<Math.min(upto,pcm.length)){
+      const n=Math.min(4800,pcm.length-apos),data=new Float32Array(n*2);
+      data.set(L.subarray(apos,apos+n),0);data.set(R.subarray(apos,apos+n),n);
+      const ad=new AudioData({format:'f32-planar',sampleRate:48000,numberOfFrames:n,numberOfChannels:2,timestamp:Math.round(apos/48000*1e6),data});
+      ae.encode(ad);ad.close();apos+=n;
+    }
+  };
+  for(let i=0;i<N;i++){
+    if(expCancelled||encErr)break;
+    renderStage(a+i/fps,true,i/fps);compose(oc,ow,oh);
+    const f=new VideoFrame(out,{timestamp:Math.round(i*1e6/fps),duration:Math.round(1e6/fps)});
+    ve.encode(f,{keyFrame:i%(fps*2)===0});f.close();
+    pushAudio((i+1)*SPF);
+    while(ve.encodeQueueSize>4)await new Promise(r=>setTimeout(r,4));
+    if(i%3===0){$('expBar').style.width=(i/N*100).toFixed(1)+'%';$('expStatus').textContent=`Gerando o vídeo… ${Math.round(i/N*100)}%`;await new Promise(r=>setTimeout(r,0))}
+  }
+  if(expCancelled){try{ve.close();ae&&ae.close()}catch(e){}return null}
+  pushAudio(Infinity);
+  await ve.flush();ae&&await ae.flush();
+  if(encErr)throw encErr;
+  ve.close();ae&&ae.close();
+  muxer.finalize();
+  return {blob:new Blob([muxer.target.buffer],{type:'video/mp4'}),ext:'mp4',note};
+}
+async function encodeRealtime(a,b,out,oc,ow,oh){
+  const mime=pickMime(); if(!mime||!out.captureStream)throw new Error('este navegador não grava vídeo. Use o Chrome atualizado');
+  const stream=out.captureStream(30);let actx=null,srcNode=null;
+  if(mp3.buffer){const AC=window.AudioContext||window.webkitAudioContext;actx=new AC();const dest=actx.createMediaStreamDestination();srcNode=actx.createBufferSource();srcNode.buffer=mp3.buffer;srcNode.connect(dest);srcNode.connect(actx.destination);dest.stream.getAudioTracks().forEach(tr=>stream.addTrack(tr))}
+  const rec=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:9e6,audioBitsPerSecond:192000});
+  const chunks=[];rec.ondataavailable=e=>{if(e.data.size)chunks.push(e.data)};
+  $('expStatus').textContent='Gravando em tempo real… deixe esta aba aberta.';
+  renderStage(a,true,0);compose(oc,ow,oh);rec.start();
+  let clock;
+  if(actx){await actx.resume();const t0=actx.currentTime+.15;srcNode.start(t0,Math.min(a,mp3.buffer.duration-.05),b-a);clock=()=>Math.max(0,actx.currentTime-t0)}
+  else{const p0=performance.now();clock=()=>(performance.now()-p0)/1000}
+  await new Promise(res=>{const step=()=>{const e=clock();if(expCancelled||e>=b-a){res();return}renderStage(a+e,true,e);compose(oc,ow,oh);$('expBar').style.width=(e/(b-a)*100).toFixed(1)+'%';requestAnimationFrame(step)};requestAnimationFrame(step)});
+  const done=new Promise(r=>rec.onstop=r);rec.stop();await done;
+  try{srcNode&&srcNode.stop()}catch(e){}actx&&actx.close();
+  if(expCancelled)return null;
+  const type=mime.split(';')[0];
+  return {blob:new Blob(chunks,{type}),ext:type==='video/mp4'?'mp4':'webm',note:'Este navegador não tem o gerador de vídeo quadro a quadro, então gravou em tempo real. Se o TikTok mostrar a duração errada, use o Chrome atualizado'};
 }
 $('btnExport').onclick=exportVideo;
 $('btnExpCancel').onclick=()=>expAbort&&expAbort();
